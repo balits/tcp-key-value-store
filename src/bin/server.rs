@@ -1,9 +1,8 @@
-use core::panic;
 use std::{collections::HashMap, net::SocketAddr};
 
-use app::conn::ConnState;
 use log::trace;
 use mio::{Events, Interest, Poll, Token};
+use socket::LoopError;
 
 const SERVER: Token = Token(0);
 
@@ -50,26 +49,23 @@ fn main() -> std::io::Result<()> {
                         trace!(target:"new_token", "spourios wake");
                         continue;
                     };
+                    trace!(target: "new_token", "conn state {:?}", conn.state());
 
-                    if event.is_readable() && conn.want_read() {
-                        let _ = app::handle_read(conn).inspect_err(|e| {
-                            trace!(target:"handle_read", "error during read: {}", e);
-                        });
-                    }
-
-                    if event.is_writable() && conn.want_write() {
-                        let _ = app::handle_write(conn).inspect_err(
-                            |e| trace!(target:"handle_write", "error during write: {}", e),
-                        );
-                    }
+                    let last_error = match app::handle_connection(conn, event) {
+                        Ok(_) => None,
+                        Err(LoopError::IncompleteRequest { .. }) => continue,
+                        Err(e) => Some(e),
+                    };
 
                     if conn.want_close() {
-                       if let ConnState::WantClose(err_msg) = conn.state() {
-                            trace!(target:"handle_close", "closing connection due to: {}", err_msg);
+                        if let Some(err) = last_error {
+                            trace!(target:"handle_close", "closing connection due to: {}", err);
                             app::handle_close(token, &mut tokgen, &poll, &mut map)?;
                         } else {
-                            panic!("Handling close: ConnState was not set properly, got: {:?}", conn.state());
-                       }
+                            unreachable!(
+                                "handle_connection didnt return an error, but connection was still set to WantClose"
+                            );
+                        }
                     }
                 }
             }
@@ -81,33 +77,63 @@ fn main() -> std::io::Result<()> {
 mod app {
     use std::{
         collections::HashMap,
-        io::{self, Read, Write},
+        io::{self, Read, Write}, usize,
     };
 
     pub use conn::Conn;
     use conn::ConnState;
-    use log::trace;
-    use mio::{Poll, Token};
+    use log::{error, trace};
+    use mio::{Poll, Token, event::Event};
+    use socket::LoopError;
 
     use crate::{eventloop::token::TokenGen, util};
 
-    pub fn handle_read(conn: &mut Conn) -> std::io::Result<()> {
+    pub fn handle_connection(conn: &mut Conn, event: &Event) -> Result<(), LoopError> {
+        if event.is_readable() && conn.want_read() {
+            match handle_read(conn) {
+                Err(le) => match le {
+                    ioerr @ LoopError::IoError(_) => {
+                        error!(target:"handle_read", "{ioerr}");
+                        return Err(ioerr);
+                    }
+                    close @ LoopError::CloseConnection(_) => {
+                        error!(target:"handle_read", "{close}");
+                        return Err(close);
+                    }
+                    other => {
+                        error!(target:"handle_read", "{other}");
+                    }
+                },
+                Ok(_) => {
+                    trace!(target:"handle_read", "OK")
+                }
+            }
+        }
+
+        if event.is_writable() && conn.want_write() {
+            match handle_write(conn) {
+                Err(e) => trace!(target:"handle_write", "error during write: {}", e),
+                Ok(_) => trace!(target:"handle_write", "OK"),
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn handle_read(conn: &mut Conn) -> Result<(), LoopError> {
         trace!(target:"handle_read", "start");
-        let mut buf = vec![0; 1024];
+        let mut buf = [0; 1024];
         match conn.stream.read(&mut buf) {
             Ok(0) => {
-                trace!(target: "handle_error", "read 0 bytes: EOF");
-                conn.state = ConnState::WantClose("Connection closed by EOF".into());
-                Ok(())
+                let msg = "read 0 bytes: EOF".to_string();
+                trace!(target: "handle_read", "{}", &msg);
+                conn.state = ConnState::WantClose;
+                Err(LoopError::CloseConnection(msg))
             }
             Ok(n) => {
-                trace!(target: "handle_error", "read {} bytes", n);
-                conn.incoming.extend(&buf[..n]);
-
-                let _request = parse_request(&conn.incoming)?;
-                conn.state = ConnState::WantWrite;
-                // handle request parsing
-                conn.outgoing.extend(&buf[..n]);
+                trace!(target: "handle_read", "read {} bytes, got: {:X?}", n, &buf[..n]);
+                conn.incoming.extend_from_slice(&buf[..n]);
+                let _request = try_one_request(conn)?;
                 Ok(())
             }
             Err(ref e) if util::would_block(e) => {
@@ -119,48 +145,93 @@ mod app {
                 Ok(())
             }
             Err(e) => {
-                conn.state = ConnState::WantClose(e.to_string());
-                Err(e)
+                trace!(target: "handle_read", "error: {e}" );
+                conn.state = ConnState::WantClose;
+                Err(LoopError::IoError(e))
             }
         }
     }
 
-    fn parse_request(buf: &[u8]) -> io::Result<()> {
-        trace!(target:"parse_request", "got {:X?}", buf);
+    fn try_one_request(conn: &mut Conn) -> Result<(), LoopError> {
+        fn get_u32(buf: &[u8]) -> u32 {
+            u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]])
+        }
+
+        if conn.incoming.len() < 4 {
+            // still wants read
+            conn.state = ConnState::WantRead;
+            return Err(LoopError::IncompleteRequest {
+                expected: 4,
+                got: conn.incoming.len() as u32,
+            });
+        }
+
+        let len = get_u32(&conn.incoming);
+
+        if  conn.incoming.len() < len as usize + 4 {
+            conn.state = ConnState::WantRead;
+            return Err(LoopError::IncompleteRequest {
+                expected: len + 4,
+                got: conn.incoming.len() as u32,
+            });
+        }
+
+        let str = match std::str::from_utf8(&conn.incoming[4..(4 + len as usize)]) {
+            Ok(s) => s,
+            Err(e) => {
+                conn.state = ConnState::WantClose;
+                return Err(LoopError::InvalidRequest(e.to_string()));
+            }
+        };
+        // only valid utf8 after this
+        log::debug!(target:"try_one_request", "got request: len {}, str {}", len, str);
+
+        conn.outgoing.extend_from_slice(&(len as u32).to_be_bytes());
+        conn.outgoing.extend_from_slice(str.as_bytes());
+        conn.incoming.drain(..(4 + len as  usize));
+
+        conn.state = ConnState::WantWrite;
+
         Ok(())
     }
 
-    pub fn handle_write(conn: &mut Conn) -> io::Result<()> {
+    pub fn handle_write(conn: &mut Conn) -> Result<(), LoopError> {
         trace!(target:"handle_write", "start");
-        let mut buf = conn.outgoing.as_slice();
-        while !buf.is_empty() {
-            match conn.stream.write(&buf) {
-                Ok(0) => {
-                    trace!(target:"handle_write", "could not write eventhough buf is not empty");
-                    conn.state = ConnState::WantClose("failed to write whole buffer".into());
-                    return Err(io::ErrorKind::WriteZero.into());
-                }
-                Ok(n) => {
-                    trace!(target:"handle_write", "sent {n} bytes, next buffer {:?}", &buf[n..]);
-                    buf = &buf[n..];
-                }
-                Err(ref e) if util::would_block(e) => {
-                    // break event loop, try again next iteration
-                    return Ok(());
-                }
-                Err(ref e) if util::interrupted(e) => {
-                    // break event loop, try again next iteration
-                    return Ok(());
-                }
-                Err(e) => {
-                    conn.state = ConnState::WantClose(e.to_string());
-                    return Err(e);
-                }
+        dbg!(&conn.incoming, &conn.outgoing);
+        assert!(
+            conn.want_write(),
+            "calling write even if conn doesnt want to write"
+        );
+        assert_ne!(0, conn.outgoing.len(), "calling write on empty buffer");
+
+        match conn.stream.write(&mut conn.outgoing) {
+            Ok(0) => {
+                let msg = "wrote 0 bytes: EOF".to_string();
+                trace!(target: "handle_write", "{}", &msg);
+                conn.state = ConnState::WantClose;
+                Err(LoopError::CloseConnection(msg))
+            }
+            Ok(n) => {
+                trace!(target: "handle_write", "wrote {} bytes out of {} ", n, conn.outgoing.len());
+                assert_eq!(n, conn.outgoing.len(), "could not write full buffer");
+                conn.outgoing.drain(..);
+                conn.state = ConnState::WantRead;
+                Ok(())
+            }
+            Err(ref e) if util::would_block(e) => {
+                //continue
+                Ok(())
+            }
+            Err(ref e) if util::interrupted(e) => {
+                //break
+                Ok(())
+            }
+            Err(e) => {
+                trace!(target: "handle_write", "error: {e}" );
+                conn.state = ConnState::WantClose;
+                Err(LoopError::IoError(e))
             }
         }
-
-        conn.state = ConnState::WantRead;
-        Ok(())
     }
 
     pub fn handle_close(
@@ -182,7 +253,7 @@ mod app {
         pub enum ConnState {
             WantRead,
             WantWrite,
-            WantClose(String),
+            WantClose,
         }
 
         #[derive(Debug)]
@@ -214,7 +285,7 @@ mod app {
                 matches!(self.state, ConnState::WantWrite)
             }
             pub fn want_close(&self) -> bool {
-                matches!(self.state, ConnState::WantClose(_))
+                matches!(self.state, ConnState::WantClose)
             }
         }
     }

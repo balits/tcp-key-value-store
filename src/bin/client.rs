@@ -1,31 +1,49 @@
 use std::{
-    io::{self, BufRead, Read, Write},
+    io::{self, Read, Write},
     net::SocketAddr,
     vec,
 };
 
 fn main() -> io::Result<()> {
-    let data = b"0005hello";
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
 
     let mut sock = std::net::TcpStream::connect(addr)?;
 
-    let mut rbuf = String::with_capacity(1024);
-    let mut wbuf = vec![0; 1024];
-    let stdin = io::stdin();
-
-    loop {
-        print!("[you] ");
-        let mut nread = stdin.lock().read_line(&mut rbuf).inspect_err(|e| eprintln!("error on stdin read {e}"))?;
-        if 0 == nread {
-            eprintln!("stdin: EOF");
-        }
-
-        sock.write_all(rbuf.as_bytes()).inspect_err(|e| eprintln!("error on socket write {e}"))?;
-        nread = sock.read(&mut wbuf).inspect_err(|e| eprintln!("error on stdin read {e}"))?;
-        if 0 == nread {
-            eprintln!("sock read: EOF");
-        }
-        println!("[srv] {}", std::str::from_utf8(&wbuf[..nread]).unwrap());
+    fn input(d: &str) -> Vec<u8> {
+        let mut v = Vec::with_capacity(4 + d.len());
+        let d32 = d.len() as u32;
+        v.extend_from_slice(&d32.to_be_bytes());
+        v.extend_from_slice(d.as_bytes());
+        v
     }
+
+    {
+        let w = input("hello");
+        let n = sock.write(&w)?;
+        assert_eq!(n, w.len());
+        println!("Send data {:X?}", &w);
+
+        let mut r = vec![0; w.len()];
+        let n = sock.read_to_end(&mut r)?;
+        assert_eq!(n, w.len());
+        assert_eq!(w, r);
+        println!("Recv data {:X?}", &r);
+    }
+
+    {
+        let w = input("world");
+        let n = sock.write(&w)?;
+        assert_eq!(n, w.len());
+        println!("Send data {:X?}", &w);
+
+        let mut r = vec![0; w.len()];
+        let n = sock.read_to_end(&mut r)?;
+        assert_eq!(n, w.len());
+        assert_eq!(w, r);
+        println!("Recv data {:X?}", &r);
+    }
+
+
+
+    Ok(())
 }
