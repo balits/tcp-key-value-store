@@ -1,5 +1,5 @@
 [package]
-name = "socket"
+name = "tcpserver"
 version = "0.1.0"
 authors = ["Balits Peter Marton balits.peter@gmail.com"]
 edition = "2024"

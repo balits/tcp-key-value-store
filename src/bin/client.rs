@@ -1,49 +1,26 @@
-use std::{
-    io::{self, Read, Write},
-    net::SocketAddr,
-    vec,
-};
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
-fn main() -> io::Result<()> {
-    let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+fn to_frame(s: &String) -> Vec<u8> {
+    let mut v = vec![];
+    let len = s.len() as u32;
+    v.extend_from_slice(&len.to_be_bytes());
+    v.extend_from_slice(s.as_bytes());
+    v
+}
 
-    let mut sock = std::net::TcpStream::connect(addr)?;
+fn main() -> std::io::Result<()> {
+    let mut sock = TcpStream::connect("127.0.0.1:8080")?;
+    let mut queries = vec!["hello1".to_string(), "hello2".to_string(), "hello3".to_string()];
+    queries.push("z".repeat(11));
+    queries.push("hello5".into());
 
-    fn input(d: &str) -> Vec<u8> {
-        let mut v = Vec::with_capacity(4 + d.len());
-        let d32 = d.len() as u32;
-        v.extend_from_slice(&d32.to_be_bytes());
-        v.extend_from_slice(d.as_bytes());
-        v
+    for bytes in queries.iter().map(to_frame) {
+        sock.write_all(&bytes)?;
+        let mut buf = [0; 1024];
+        let n = sock.read(&mut buf)?;
+        println!("got: {}", String::from_utf8_lossy(&buf[..n]));
     }
-
-    {
-        let w = input("hello");
-        let n = sock.write(&w)?;
-        assert_eq!(n, w.len());
-        println!("Send data {:X?}", &w);
-
-        let mut r = vec![0; w.len()];
-        let n = sock.read_to_end(&mut r)?;
-        assert_eq!(n, w.len());
-        assert_eq!(w, r);
-        println!("Recv data {:X?}", &r);
-    }
-
-    {
-        let w = input("world");
-        let n = sock.write(&w)?;
-        assert_eq!(n, w.len());
-        println!("Send data {:X?}", &w);
-
-        let mut r = vec![0; w.len()];
-        let n = sock.read_to_end(&mut r)?;
-        assert_eq!(n, w.len());
-        assert_eq!(w, r);
-        println!("Recv data {:X?}", &r);
-    }
-
-
 
     Ok(())
 }
