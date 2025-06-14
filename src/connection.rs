@@ -1,5 +1,5 @@
 use crate::{SERVER, util::would_block};
-use log::{error, info, trace};
+use log::{debug, error, info, trace};
 use mio::{
     Interest, Token,
     net::{TcpListener, TcpStream},
@@ -57,10 +57,9 @@ impl Connection {
             self.state,
             "calling read on non WantRead state"
         );
-        let mut buf = [0; 1024];
-        let mut bytes_read = 0;
+        let mut buf = [0; 1024 * 64];
         loop {
-            match self.stream.read(&mut buf[bytes_read..]) {
+            let n = match self.stream.read(&mut buf) {
                 Ok(0) => {
                     error!(target:"on_read", "{}", if self.incoming.is_empty() { "client dropped connection" } else { "unexpected eof" } );
                     // set state to WantClose, and let the main loop
@@ -69,18 +68,8 @@ impl Connection {
                     self.close();
                     return Ok(());
                 }
-                Ok(n) => {
-                    self.incoming.extend_from_slice(&buf[bytes_read..n]);
-                    bytes_read += n;
-
-                    // read buffer full
-                    if bytes_read == buf.len() {
-                        trace!(target:"on_read", "read buffer is full");
-                        break;
-                    }
-                }
+                Ok(n) => n,
                 Err(ref e) if would_block(e) => {
-                    // not ready yet
                     break;
                 }
                 Err(e) => {
@@ -88,9 +77,29 @@ impl Connection {
                     return Err(e);
                 }
             };
+            self.incoming.extend_from_slice(&buf[..n]);
+            trace!(target:"on_read", "got {n} bytes");
         }
-        let new_state = self.try_one_request();
-        self.state = new_state;
+
+        let mut last_state;
+        loop {
+            // while we successfuly parse requests
+            // where last_state = WantWrite == success
+            last_state = self.try_one_request();
+            dbg!(last_state, self.incoming.len());
+            if last_state != ConnectionState::WantWrite {
+                break;
+            }
+        }
+
+        if !self.outgoing.is_empty() {
+            // we have at least one request ready to send
+            // this way we skip one syscall to poll in the main loop
+            self.state = ConnectionState::WantWrite;
+            return self.on_write();
+        } else {
+            self.state = last_state;
+        }
         Ok(())
     }
 
@@ -112,6 +121,7 @@ impl Connection {
                 return Ok(());
             }
             Ok(n) => n,
+            Err(ref e) if would_block(e) => return Ok(()),
             Err(e) => {
                 self.close();
                 return Err(e);
@@ -121,8 +131,7 @@ impl Connection {
         info!(target:"on_write", "wrote {} bytes, out of {}", n, self.outgoing.len());
         self.outgoing.drain(..n);
 
-        dbg!(&self.outgoing);
-        if self.outgoing.len() == 0 {
+        if self.outgoing.is_empty() {
             self.state = ConnectionState::WantRead;
         } else {
             self.state = ConnectionState::WantWrite;
@@ -132,7 +141,8 @@ impl Connection {
     }
 
     fn try_one_request(&mut self) -> ConnectionState {
-        const MAX_SZ: u32 = 10;
+        // dbg!(&self.state, self.incoming.len(), self.outgoing.len());
+        const MAX_SZ: u32 = 32 << 20;
         use std::str::from_utf8;
         fn get_u32(n: &[u8]) -> u32 {
             u32::from_be_bytes([n[0], n[1], n[2], n[3]])
@@ -151,6 +161,7 @@ impl Connection {
             return ConnectionState::WantClose; // want close
         }
 
+        trace!(target:"on_request", "if {} < {}", self.incoming.len(), (4 + len32 as usize));
         if self.incoming.len() < 4 + len32 as usize {
             trace!(target: "on_request", "not enough bytes for string");
             return ConnectionState::WantRead; // want more read
@@ -160,10 +171,13 @@ impl Connection {
         let str = from_utf8(strbuf).expect("invalid utf8 while parsing");
         // str is valid utf8 now
 
+        // process_request()
+
+        // consume request
         self.outgoing.extend_from_slice(&self.incoming[..4]);
         self.outgoing.extend_from_slice(str.as_bytes());
-
-        self.incoming.drain(..(4 + len32) as usize); // removing request
+        // removing request
+        self.incoming.drain(..(4 + len32) as usize);
 
         ConnectionState::WantWrite
     }
