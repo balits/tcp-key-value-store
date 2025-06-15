@@ -1,5 +1,7 @@
 pub mod connection;
 pub mod util;
+pub mod protocol;
+pub mod storage;
 
 use core::panic;
 use std::{u32, usize};

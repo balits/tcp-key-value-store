@@ -1,10 +1,16 @@
 use std::{io, net::SocketAddr};
 
-use log::trace;
+use log::{error, trace};
 use mio::{Events, Interest, Poll};
 use tcpserver::{SERVER, connection::ConnectionManager, util::interrupted};
 
-fn main() -> io::Result<()> {
+fn main() {
+    if let Err(e) = try_main() {
+        error!("{e}")
+    }
+}
+
+fn try_main() -> io::Result<()> {
     env_logger::builder().init();
 
     let mut poll = Poll::new()?;
@@ -43,7 +49,6 @@ fn main() -> io::Result<()> {
                     if event.is_writable() && conn.want_write() {
                         conn.on_write()?;
                     }
-
 
                     if conn.want_close() {
                         connection_manager.handle_close(&poll, token)?;

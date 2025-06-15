@@ -1,5 +1,5 @@
-use crate::{SERVER, util::would_block};
-use log::{debug, error, info, trace};
+use crate::{protocol, storage::MAP, util::would_block, SERVER};
+use log::{error, info, trace};
 use mio::{
     Interest, Token,
     net::{TcpListener, TcpStream},
@@ -61,7 +61,7 @@ impl Connection {
         loop {
             let n = match self.stream.read(&mut buf) {
                 Ok(0) => {
-                    error!(target:"on_read", "{}", if self.incoming.is_empty() { "client dropped connection" } else { "unexpected eof" } );
+                    trace!(target:"on_read", "{}", if self.incoming.is_empty() { "client dropped connection" } else { "unexpected eof" } );
                     // set state to WantClose, and let the main loop
                     // handle closing the connection
                     // instead of propagating io::Error
@@ -78,15 +78,15 @@ impl Connection {
                 }
             };
             self.incoming.extend_from_slice(&buf[..n]);
-            trace!(target:"on_read", "got {n} bytes");
         }
+
+        info!("read {} bytes", self.incoming.len());
 
         let mut last_state;
         loop {
             // while we successfuly parse requests
             // where last_state = WantWrite == success
             last_state = self.try_one_request();
-            dbg!(last_state, self.incoming.len());
             if last_state != ConnectionState::WantWrite {
                 break;
             }
@@ -113,7 +113,7 @@ impl Connection {
 
         let n = match self.stream.write(&self.outgoing) {
             Ok(0) => {
-                info!(target:"on_write", "wrote 0 bytes to buffer");
+                error!("wrote 0 bytes to buffer");
                 // set state to WantClose, and let the main loop
                 // handle closing the connection
                 // instead of propagating io::Error
@@ -128,7 +128,7 @@ impl Connection {
             }
         };
 
-        info!(target:"on_write", "wrote {} bytes, out of {}", n, self.outgoing.len());
+        info!("wrote {} bytes, out of {}", n, self.outgoing.len());
         self.outgoing.drain(..n);
 
         if self.outgoing.is_empty() {
@@ -140,51 +140,43 @@ impl Connection {
         Ok(())
     }
 
+    /// Tries to parse one request, returning the new state
+    /// for the connection:
+    /// -   **WantWrite:** This is the "success" path, indicating that we
+    ///     parsed one request, and its put onto the outgoing buffer to read
+    ///
+    /// -   **WantRead:** If there wasnt enough bytes to parse, we need to read more
+    ///
+    /// -   **WantClose:** Someting seriously went wrong - likely some protocol error - and the main loop should
+    ///     close down the connection
     fn try_one_request(&mut self) -> ConnectionState {
-        // dbg!(&self.state, self.incoming.len(), self.outgoing.len());
-        const MAX_SZ: u32 = 32 << 20;
-        use std::str::from_utf8;
-        fn get_u32(n: &[u8]) -> u32 {
-            u32::from_be_bytes([n[0], n[1], n[2], n[3]])
+        use protocol::ParseError::*;
+        
+        // dip early
+        if self.incoming.is_empty() {
+            return ConnectionState::WantRead
         }
 
-        if self.incoming.len() < 4 {
-            trace!(target: "on_request", "not enough bytes for prefix");
-            return ConnectionState::WantRead; // want more read
-        }
+        let result = protocol::parse_request(&self.incoming)
+            .inspect_err(|e| info!(target:"parse_request", "{e}"));
 
-        let len32 = get_u32(&self.incoming[..4]);
+        let (cmds, offset) = match result {
+            Ok(v) => v,
+            Err(ProtocolError) => return ConnectionState::WantClose,
+            Err(NotEnoughBytes { .. }) => return ConnectionState::WantRead,
+        };
 
-        // protocol error
-        if len32 > MAX_SZ {
-            trace!(target: "on_request", "len prefix is larger than allowed {len32} > {MAX_SZ}");
-            return ConnectionState::WantClose; // want close
-        }
-
-        trace!(target:"on_request", "if {} < {}", self.incoming.len(), (4 + len32 as usize));
-        if self.incoming.len() < 4 + len32 as usize {
-            trace!(target: "on_request", "not enough bytes for string");
-            return ConnectionState::WantRead; // want more read
-        }
-
-        let strbuf = &self.incoming[4..(4 + len32 as usize)];
-        let str = from_utf8(strbuf).expect("invalid utf8 while parsing");
-        // str is valid utf8 now
-
-        // process_request()
-
-        // consume request
-        self.outgoing.extend_from_slice(&self.incoming[..4]);
-        self.outgoing.extend_from_slice(str.as_bytes());
-        // removing request
-        self.incoming.drain(..(4 + len32) as usize);
-
+        // consume requests
+        self.incoming.drain(..offset);
+        protocol::request::handle_and_encode_request(cmds, &mut self.outgoing);
+        dbg!(&MAP);
+        
         ConnectionState::WantWrite
     }
 }
 
 pub struct ConnectionManager {
-    pub map: HashMap<mio::Token, Connection>,
+    pub map: HashMap<Token, Connection>,
     token_gen: TokenGen,
 }
 
