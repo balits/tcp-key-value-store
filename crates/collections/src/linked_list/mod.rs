@@ -9,14 +9,18 @@ impl List {
     pub fn new() -> Self {
         Self { head: None, len: 0 }
     }
+
+    #[inline]
     pub fn len(&self) -> usize {
         self.len
     }
 
+    #[inline]
     pub fn push<S: Into<String>>(&mut self, key: S, value: S) {
         self.push_boxed(boxnode!(key, value));
     }
 
+    #[inline]
     fn push_boxed(&mut self, mut boxed: Box<Node>) {
         boxed.next = self.head.take();
         let next_node = Some(boxed);
@@ -36,6 +40,7 @@ impl List {
         }
     }
 
+    #[inline]
     pub fn peek(&self) -> Option<&Node> {
         match self.head {
             Some(ref head) => Some(head),
@@ -43,6 +48,7 @@ impl List {
         }
     }
 
+    #[inline]
     pub fn peek_mut(&mut self) -> Option<&mut Node> {
         match self.head {
             Some(ref mut head) => Some(head),
@@ -51,6 +57,7 @@ impl List {
     }
     // [adapters]
 
+    #[inline]
     pub fn iter(&self) -> Iter<'_> {
         Iter::new(self)
     }
