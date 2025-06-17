@@ -62,6 +62,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "collections"
+version = "0.1.0"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -253,6 +257,7 @@ dependencies = [
 name = "tcpserver"
 version = "0.1.0"
 dependencies = [
+ "collections",
  "env_logger",
  "log",
  "mio",
