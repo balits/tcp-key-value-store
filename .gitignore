@@ -1,4 +1,5 @@
-.vscode
 target
-debug
-**/*.rs.bk
+**/target
+**/Cargo.lock
+
+.vscode
