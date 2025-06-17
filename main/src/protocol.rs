@@ -71,14 +71,14 @@ pub fn parse_request(src: &[u8]) -> Result<(Vec<String>, usize), ParseError> {
     let mut dst = Vec::with_capacity(num_str);
 
     for _ in 0..num_str {
-        let len = get_u32(&src, cursor)? as usize;
+        let len = get_u32(src, cursor)? as usize;
 
         if len > MAX_ARGS {
             return Err(ParseError::ProtocolError);
         }
         cursor += 4;
 
-        let s = get_str(&src, cursor, cursor + len)?;
+        let s = get_str(src, cursor, cursor + len)?;
         dst.push(s.into());
 
         cursor += len;
@@ -87,7 +87,7 @@ pub fn parse_request(src: &[u8]) -> Result<(Vec<String>, usize), ParseError> {
     Ok((dst, cursor))
 }
 
-fn get_str<'a>(src: &'a [u8], start: usize, end: usize) -> Result<&'a str, ParseError> {
+fn get_str(src: &[u8], start: usize, end: usize) -> Result<&str, ParseError> {
     if src.len() < start {
         // want read
         Err(ParseError::NotEnoughBytes {

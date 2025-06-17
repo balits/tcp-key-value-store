@@ -1,8 +1,16 @@
+use std::hash::Hash;
+
 use crate::boxnode;
 
 pub struct List {
     head: Option<Box<Node>>,
     len: usize,
+}
+
+impl Default for List {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl List {
@@ -16,8 +24,13 @@ impl List {
     }
 
     #[inline]
-    pub fn push<S: Into<String>>(&mut self, key: S, value: S) {
+    pub fn push_from_parts<S: Into<String>>(&mut self, key: S, value: S) {
         self.push_boxed(boxnode!(key, value));
+    }
+
+    #[inline]
+    pub fn push(&mut self, node: Node) {
+        self.push_boxed(Box::new(node));
     }
 
     #[inline]
@@ -42,24 +55,24 @@ impl List {
 
     #[inline]
     pub fn peek(&self) -> Option<&Node> {
-        match self.head {
-            Some(ref head) => Some(head),
-            None => None,
-        }
+        self.head.as_ref().map(|x| x as _)
     }
 
     #[inline]
     pub fn peek_mut(&mut self) -> Option<&mut Node> {
-        match self.head {
-            Some(ref mut head) => Some(head),
-            None => None,
-        }
+        self.head.as_mut().map(|x| x as _)
     }
+
     // [adapters]
 
     #[inline]
-    pub fn iter(&self) -> Iter<'_> {
-        Iter::new(self)
+    pub fn iter(&self) -> IterRef<'_> {
+        IterRef::new(self)
+    }
+
+    #[inline]
+    pub fn iter_mut(&mut self) -> IterMut<'_> {
+        IterMut::new(self)
     }
 }
 
@@ -88,39 +101,20 @@ impl IntoIterator for List {
     }
 }
 
-pub struct Node {
-    pub(crate) key: String,
-    pub(crate) value: String,
-    pub(crate) next: Option<Box<Node>>,
-}
-
-impl PartialEq for Node {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.value == other.value
-    }
-}
-impl Eq for Node {}
-
-impl std::fmt::Debug for Node {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<{}, {}>", self.key, self.value)
-    }
-}
-
 // [iterators]
 
-pub struct Iter<'a> {
-    current: Option<&'a Node>,
+pub struct IterRef<'a> {
+    next: Option<&'a Node>,
     len: usize,
 }
 
-impl<'a> Iterator for Iter<'a> {
+impl<'a> Iterator for IterRef<'a> {
     type Item = &'a Node;
     fn next(&mut self) -> Option<Self::Item> {
-        match self.current.take() {
+        match self.next.take() {
             None => None,
             Some(node) => {
-                self.current = node.next.as_deref();
+                self.next = node.next.as_deref();
                 Some(node)
             }
         }
@@ -131,12 +125,46 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
-impl<'a> Iter<'a> {
+impl<'a> IterRef<'a> {
     pub fn new(list: &'a List) -> Self {
-        let current = list.head.as_ref().map(|h| &**h);
+        let next = list.head.as_deref();
 
         Self {
-            current,
+            next,
+            len: list.len,
+        }
+    }
+}
+
+pub struct IterMut<'a> {
+    next: Option<&'a mut Node>,
+    len: usize,
+}
+
+impl<'a> Iterator for IterMut<'a> {
+    type Item = (&'a mut String, &'a mut String);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next.take().map(|node| {
+            self.next = node.next.as_deref_mut();
+            let k = &mut node.key;
+            let v = &mut node.value;
+
+            (k,v)
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len, Some(self.len))
+    }
+}
+
+impl<'a> IterMut<'a> {
+    pub fn new(list: &'a mut List) -> Self {
+        let next = list.head.as_deref_mut();
+
+        Self {
+            next,
             len: list.len,
         }
     }
@@ -161,6 +189,33 @@ impl IterOwn {
     }
 }
 
+// [internal nodes]
+
+pub struct Node {
+    pub(crate) key: String,
+    pub(crate) value: String,
+    pub(crate) next: Option<Box<Node>>,
+}
+
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.value == other.value
+    }
+}
+impl Eq for Node {}
+
+impl Hash for Node {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(self.value.as_bytes());
+    }
+}
+
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<\"{}\", \"{}>\"", self.key, self.value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::List;
@@ -173,7 +228,7 @@ mod tests {
         for i in 0..10 {
             let k = format!("key{i}");
             let v = format!("value{i}");
-            list.push(k, v);
+            list.push_from_parts(k, v);
         }
 
         assert_eq!(10, list.len());
@@ -187,9 +242,9 @@ mod tests {
         assert!(list.pop().is_none());
 
         // Populate list
-        list.push("k1", "v1");
-        list.push("k2", "v2");
-        list.push("k3", "v3");
+        list.push_from_parts("k1", "v1");
+        list.push_from_parts("k2", "v2");
+        list.push_from_parts("k3", "v3");
 
         // Check normal removal
         let p = list.pop().unwrap();
@@ -201,8 +256,8 @@ mod tests {
         assert_eq!(p.value, "v2");
 
         // Push some more just to make sure nothing's corrupted
-        list.push("k5", "v5");
-        list.push("k6", "v6");
+        list.push_from_parts("k5", "v5");
+        list.push_from_parts("k6", "v6");
 
         // Check normal removal
         let p = list.pop().unwrap();
@@ -224,9 +279,9 @@ mod tests {
         assert_eq!(list.peek(), None);
         assert_eq!(list.peek_mut(), None);
 
-        list.push("k1", "v1");
-        list.push("k2", "v2");
-        list.push("k3", "v3");
+        list.push_from_parts("k1", "v1");
+        list.push_from_parts("k2", "v2");
+        list.push_from_parts("k3", "v3");
 
         assert_eq!(list.peek(), Some(&node!("k3", "v3")));
         assert_eq!(list.peek_mut(), Some(&mut node!("k3", "v3")));
@@ -248,7 +303,7 @@ mod tests {
         for i in 0..10 {
             let k = format!("key{i}");
             let v = format!("value{i}");
-            list.push(k, v);
+            list.push_from_parts(k, v);
         }
 
         for (i, e) in list.iter().enumerate() {
