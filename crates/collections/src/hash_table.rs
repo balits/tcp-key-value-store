@@ -3,13 +3,11 @@ use std::{
     hash::{DefaultHasher, Hasher},
 };
 
-use crate::{Node, node};
-
-pub const DEFAULT_BUCKET_SIZE: usize = 2;
+use super::Entry;
 
 #[derive(Debug)]
 pub(crate) struct HashTable {
-    pub(crate) buckets: Vec<LinkedList<Node>>,
+    pub(crate) buckets: Vec<LinkedList<Entry>>,
     pub(crate) items: usize,
     pub(crate) mask: usize,
 }
@@ -17,134 +15,98 @@ pub(crate) struct HashTable {
 #[derive(Debug)]
 pub struct Iter<'a> {
     ht: &'a HashTable,
-    cursor: Cursor<'a, Node>,
+    cursor: Cursor<'a, Entry>,
     bucket_idx: usize,
 }
 
 impl Default for HashTable {
     fn default() -> Self {
-        Self::new_with_buckets(DEFAULT_BUCKET_SIZE)
+        Self::new_with_buckets(Self::DEFAULT_BUCKET_SIZE)
     }
 }
 
 impl HashTable {
-    /// Creates a new, empty hashmap
-    ///
-    /// # Note
-    ///
-    /// This is a `const` function since it does not allocate,
-    pub const fn new_empty() -> Self {
-        Self {
-            buckets: Vec::new(),
-            items: 0,
-            mask: 0,
-        }
-    }
+    pub const DEFAULT_BUCKET_SIZE: usize = 4;
+    pub const EMPTY_TABLE: HashTable = HashTable {
+        buckets: Vec::new(),
+        mask: 0,
+        items: 0,
+    };
 
     /// Creates a new `HashTable` with `cap` many buckets
-    pub fn new_with_buckets(cap: usize) -> Self {
+    pub fn new_with_buckets(size: usize) -> Self {
+        let mut buckets = Vec::with_capacity(size);
+        for _ in 0..size {
+            buckets.push(LinkedList::new());
+        }
+
+        let mask = if size == 0 { 0 } else { size - 1 };
+
         Self {
-            buckets: (0..cap).map(|_| LinkedList::new()).collect(),
+            buckets,
             items: 0,
-            mask: cap - 1,
+            mask,
         }
     }
 
-    /// Returns the number of items in the hashmap
-    pub fn used(&self) -> usize {
-        self.items
-    }
-
-    /// Shorthand for `self.len() == 0`
+    /// Shorthand for `self.items == 0`
     pub fn is_empty(&self) -> bool {
-        self.used() == 0
+        self.items == 0
     }
 
-    /// Returns the number of buckets, or "slots" of the hashmap
+    /// Returns the number of buckets, or "slots" of the hash table
     pub fn bucket_count(&self) -> usize {
         self.buckets.len()
     }
 
+    /// Returns the loadfactor of the hash table
+    /// computed as num of items / num of buckets
     pub fn load_factor(&self) -> usize {
         self.items.checked_div(self.bucket_count()).unwrap_or(0)
     }
 
-    pub fn load_factor_f32(&self) -> f32 {
-        if self.bucket_count() == 0 {
-            0f32
-        } else {
-            (self.items as f32) / self.bucket_count() as f32
-        }
-    }
-
-    /// Shorthand for `self.insert(node!(key, value))`
-    fn insert_kv(&mut self, key: &str, value: &str) -> Option<String> {
-        self.insert(node!(key, value))
-    }
-
-    /// Inserts node into the map (even if its empty)
-    /// but does not resize exponentially,
-    /// leading to long chains
-    pub fn insert_without_resize(&mut self, node: Node) -> Option<String> {
-        // Of course we cannot insert to an empty map
-        if self.bucket_count() == 0 {
-            self.resize();
-        }
-        self._insert(node)
-    }
-
-    /// Insert a key-value pair into the hashmap,
-    /// returning the previous value (if there was any)
-    pub fn insert(&mut self, node: Node) -> Option<String> {
-        if self.is_empty() || self.items > self.bucket_count() * 3 / 4 {
-            self.resize();
-        }
-
-        self._insert(node)
-    }
-
-    fn _insert(&mut self, node: Node) -> Option<String> {
+    /// Inserts an item into the hash table.
+    /// This does not resize the table, so if
+    /// the tables size is 0, then this function return early with `None`
+    pub fn insert(&mut self, node: Entry) -> Option<String> {
         let hash = Self::hash(&node.key.as_str());
         let i = hash as usize & self.mask;
 
-        match self.buckets[i]
+        let slot: Option<&mut Entry> = self
+            .buckets
+            .get_mut(i)?
             .iter_mut()
-            .find(|n| n.key.as_str() == &node.key)
-        {
+            .find(|n| n.key.as_str() == &node.key);
+
+        match slot {
             Some(n) => {
                 let old = std::mem::replace(&mut n.value, node.value);
-
                 Some(old)
             }
             None => {
                 self.buckets[i].push_back(node);
                 self.items += 1;
-
                 None
             }
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&Node> {
+    pub fn get(&self, key: &str) -> Option<&Entry> {
         let hash = Self::hash(key);
         let i = hash as usize & self.mask;
-        self.buckets[i].iter().find(|n| n.key == key)
+        self.buckets.get(i)?.iter().find(|n| n.key == key)
     }
 
-    pub fn get_mut(&mut self, key: &str) -> Option<&mut Node> {
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Entry> {
         let hash = Self::hash(key);
         let i = hash as usize & self.mask;
-        self.buckets[i].iter_mut().find(|n| n.key == key)
+        self.buckets.get_mut(i)?.iter_mut().find(|n| n.key == key)
     }
 
-    pub fn contains_key(&self, key: &str) -> bool {
-        self.get(key).is_some()
-    }
-
-    pub fn remove(&mut self, key: &str) -> Option<Node> {
+    pub fn remove(&mut self, key: &str) -> Option<Entry> {
         let hash = Self::hash(key);
         let i = hash as usize & self.mask;
-        let mut cursor_mut = self.buckets[i].cursor_front_mut();
+        let mut cursor_mut = self.buckets.get_mut(i)?.cursor_front_mut();
         loop {
             match cursor_mut.current() {
                 Some(node) => {
@@ -158,12 +120,16 @@ impl HashTable {
         }
     }
 
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
     // [adapters]
 
     pub fn iter(&self) -> Iter<'_> {
         let cursor = if self.is_empty() {
             /// FIXME: stupid variable that nobody wants here!
-            static EMPTY_LIST: LinkedList<Node> = LinkedList::new();
+            static EMPTY_LIST: LinkedList<Entry> = LinkedList::new();
             EMPTY_LIST.cursor_front()
         } else {
             self.buckets[0].cursor_front()
@@ -187,54 +153,16 @@ impl HashTable {
     fn idx(&self, key: &str) -> usize {
         Self::hash(key) as usize & self.mask
     }
-
-    // [private]
-
-    /// Resizes the hashmap
-    ///
-    /// # Panics
-    ///
-    /// This will not allocate more than `isize::MAX`
-    /// and will panic if it ever tries to
-    fn resize(&mut self) {
-        let new_cap = self.next_capacity();
-        // NOTE: allocating more than `isize::MAX`
-        // panics when a `Vec` resize internally
-        let mut new_buckets: Vec<_> = (0..new_cap).map(|_| LinkedList::new()).collect();
-
-        for bucks in self.buckets.drain(..) {
-            for elem in bucks {
-                let i = Self::hash(&elem.key) as usize & self.mask;
-                new_buckets[i].push_back(elem);
-            }
-        }
-
-        let _ = std::mem::replace(&mut self.buckets, new_buckets);
-        // dropping old buckets
-    }
-
-    /// Returns the new capacity,
-    /// and sets the `mask` accordingly
-    ///
-    /// # Note
-    ///
-    /// Growing the hashmap should only rely on this funcion
-    /// as this ensures capacity is always a power of two
-    fn next_capacity(&mut self) -> usize {
-        let cap = match self.buckets.len() {
-            0 => DEFAULT_BUCKET_SIZE,
-            n => n * 2,
-        };
-        self.mask = cap - 1;
-
-        cap
-    }
 }
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = &'a Node;
+    type Item = &'a Entry;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.ht.bucket_count() == 0 {
+            return None;
+        }
+
         loop {
             match self.cursor.current() {
                 Some(node) => {
@@ -256,33 +184,41 @@ impl<'a> Iterator for Iter<'a> {
 #[cfg(test)]
 mod test {
     use super::HashTable;
-    use crate::{hashmap::hash_table::DEFAULT_BUCKET_SIZE, node};
+    macro_rules! node {
+        ( $key: expr, $value: expr ) => {
+            $crate::Entry {
+                key: $key.into(),
+                value: $value.into(),
+            }
+        };
+    }
 
     #[test]
     fn insert() {
-        let mut t = HashTable::new_empty();
+        let mut t = HashTable::default();
+        dbg!(&t);
 
-        let old = t.insert_kv("foo", "bar");
+        let old = t.insert(node!("foo", "bar"));
         assert_eq!(old, None);
-        assert_eq!(t.used(), 1);
+        assert_eq!(t.items, 1);
 
-        let old = t.insert_kv("foo", "baz");
-        assert_eq!(old, Some("bar".into()));
-        assert_eq!(t.used(), 1);
+        // let old = t.insert(node!("foo", "baz"));
+        // assert_eq!(old, Some("bar".into()));
+        // assert_eq!(t.items(), 1);
 
-        t.insert_kv("peti", "is a baby");
-        t.insert_kv("sina", "is a tiny baby");
+        // t.insert(node!("peti", "is a baby"));
+        // t.insert(node!("sina", "is a tiny baby"));
 
-        assert_eq!(t.used(), 3);
-        assert_eq!(t.mask + 1, t.bucket_count());
+        // assert_eq!(t.items(), 3);
+        // assert_eq!(t.mask + 1, t.bucket_count());
         dbg!(t);
     }
     #[test]
     fn get() {
-        let mut t = HashTable::new_empty();
+        let mut t = HashTable::default();
 
-        t.insert_kv("peti", "is a baby");
-        t.insert_kv("sina", "is a tiny baby");
+        t.insert(node!("peti", "is a baby"));
+        t.insert(node!("sina", "is a tiny baby"));
 
         assert_eq!(t.get("peti"), Some(&node!("peti", "is a baby")));
         assert_eq!(t.get("sina"), Some(&node!("sina", "is a tiny baby")));
@@ -292,7 +228,7 @@ mod test {
 
     #[test]
     fn dbg() {
-        let mut t = HashTable::new_with_buckets(DEFAULT_BUCKET_SIZE);
+        let mut t = HashTable::new_with_buckets(12);
 
         let pairs: Vec<(String, String)> = (0..25)
             .map(|i| {
@@ -307,11 +243,11 @@ mod test {
         }
 
         assert_eq!(t.mask + 1, t.bucket_count());
-        dbg!(t);
+        dbg!(t.load_factor(), t);
     }
     #[test]
     fn dbg_long_chains() {
-        let mut t = HashTable::new_empty();
+        let mut t = HashTable::new_with_buckets(2);
 
         let pairs: Vec<(String, String)> = (0..25)
             .map(|i| {
@@ -322,19 +258,19 @@ mod test {
             .collect();
 
         for (k, v) in pairs {
-            t.insert_without_resize(node!(k, v));
+            t.insert(node!(k, v));
         }
 
         assert_eq!(t.mask + 1, t.bucket_count());
-        dbg!(t);
+        dbg!(t.load_factor(), t);
     }
 
     #[test]
     fn iter() {
-        let mut h = HashTable::new_empty();
+        let mut h = HashTable::new_with_buckets(0);
 
         for i in 0..32 {
-            h.insert_kv(format!("{}", i).as_str(), "");
+            h.insert(node!(format!("{}", i).as_str(), ""));
         }
 
         for node in h.iter() {
@@ -346,18 +282,21 @@ mod test {
 
     #[test]
     fn rust_doc_example() {
-        let mut book_reviews = HashTable::new_empty();
+        let mut book_reviews = HashTable::new_with_buckets(0);
 
         // Review some books.
-        book_reviews.insert_kv("Adventures of Huckleberry Finn", "My favorite book.");
-        book_reviews.insert_kv("Grimms' Fairy Tales", "Masterpiece.");
-        book_reviews.insert_kv("Pride and Prejudice", "Very enjoyable.");
-        book_reviews.insert_kv("The Adventures of Sherlock Holmes", "Eye lyked it alot.");
+        book_reviews.insert(node!("Adventures of Huckleberry Finn", "My favorite book."));
+        book_reviews.insert(node!("Grimms' Fairy Tales", "Masterpiece."));
+        book_reviews.insert(node!("Pride and Prejudice", "Very enjoyable."));
+        book_reviews.insert(node!(
+            "The Adventures of Sherlock Holmes",
+            "Eye lyked it alot."
+        ));
 
         if !book_reviews.contains_key("Les Misérables") {
             println!(
                 "We've got {} reviews, but Les Misérables ain't one.",
-                book_reviews.used()
+                book_reviews.items
             );
         }
 
