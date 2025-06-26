@@ -2,13 +2,21 @@
 mod dict;
 mod hash_table;
 
-
 pub use dict::Dict;
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct Entry {
     key: String,
     value: String,
+}
+
+impl Entry {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+    pub fn value(&self) -> &str {
+        &self.value
+    }
 }
 
 use thiserror::Error;
@@ -30,6 +38,5 @@ pub enum PartialRehashError {
     IncorrectLoadFactor {
         rehash_idx: isize,
         load_factor: usize,
-    }
+    },
 }
-
