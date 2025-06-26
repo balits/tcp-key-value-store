@@ -1,4 +1,4 @@
-use crate::{protocol, storage::MAP, util::would_block, SERVER};
+use crate::{protocol, storage::MAP2, util::would_block, SERVER};
 use log::{error, info, trace};
 use mio::{
     Interest, Token,
@@ -169,7 +169,11 @@ impl Connection {
         // consume requests
         self.incoming.drain(..offset);
         protocol::request::handle_and_encode_request(cmds, &mut self.outgoing);
-        dbg!(&MAP);
+
+        #[allow(static_mut_refs)]
+        unsafe {
+            dbg!(&MAP2.get());
+        }
         
         ConnectionState::WantWrite
     }

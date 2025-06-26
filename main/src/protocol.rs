@@ -30,30 +30,34 @@ pub mod request {
         }
     }
 
+    #[allow(static_mut_refs)]
     pub fn handle_and_encode_request(cmd: Vec<String>, buf: &mut Vec<u8>) {
-        let mut map = crate::storage::MAP.lock().unwrap();
+        let map = unsafe {
+            crate::storage::MAP2.get_mut_or_init(|| collections::Dict::default())
+        };
+
         match cmd.len() {
             2 if cmd[0] == "get" => {
                 if let Some(v) = map.get(&cmd[1]) {
-                    serialize(RES_OK, v.as_bytes(), buf)
+                    serialize(RES_OK, v.value().as_bytes(), buf)
                 } else {
                     serialize(RES_NX, &[], buf)
                 }
             }
             2 if cmd[0] == "del" => {
                 if let Some(s) = map.remove(cmd[1].as_str()) {
-                    serialize(RES_OK, s.as_bytes(), buf)
+                    serialize(RES_OK, s.value().as_bytes(), buf)
                 } else {
                     serialize(RES_NX, &[], buf)
                 };
-
             }
             3 if cmd[0] == "set" => {
-                map.entry(cmd[1].clone())
-                    .and_modify(|v| *v = cmd[2].clone())
-                    .or_insert(cmd[2].clone());
-
-                serialize(RES_OK, cmd[2].as_bytes(), buf)
+                let old = map.insert(&cmd[1], &cmd[2]);
+                let res: &[u8] = match old {
+                    Some(ref s) => s.as_bytes(),
+                    None => cmd[2].as_str().as_bytes()
+                };
+                serialize(RES_OK, res, buf)
             }
             _ => serialize(RES_OK, &[], buf),
         }

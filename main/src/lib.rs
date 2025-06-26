@@ -1,3 +1,5 @@
+#![feature(once_cell_get_mut)]
+
 pub mod connection;
 pub mod util;
 pub mod protocol;
